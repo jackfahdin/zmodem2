@@ -1,0 +1,48 @@
+name: NyaTerm branch
+
+# Upstream mirrors this crate from codeberg and carries no GitHub workflow, so
+# nothing verified this branch.
+#
+# Triggers on this branch only, and lives in its own file rather than editing
+# upstream's workflow, so rebasing the patch series onto a newer upstream never
+# conflicts over CI configuration.
+
+on:
+  push:
+    branches: ["nyaterm"]
+  pull_request:
+    branches: ["nyaterm"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: fmt, check, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # tests/integration.rs reads ZMODEM_RZ_BIN and ZMODEM_SZ_BIN through
+      # `env!`, which build.rs only emits when lrzsz is on PATH, so without it
+      # those tests fail to compile rather than being skipped. Upstream's
+      # woodpecker pipeline installs it the same way. This also gives the
+      # `has_lrzsz` branch of build.rs real coverage, which is the half of this
+      # branch's patch that a machine without lrzsz never exercises.
+      - name: Install lrzsz
+        run: sudo apt-get update && sudo apt-get install -y lrzsz
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Tests
+        run: cargo test
+
+# clippy is deliberately not enforced here. `cargo clippy --all-targets -D warnings`
+# already fails on the base revision, in src/lib.rs, src/std.rs and
+# src/transmission.rs — files this branch does not touch. Enforcing it would
+# report upstream debt as a NyaTerm regression.
