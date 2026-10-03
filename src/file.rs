@@ -56,6 +56,7 @@ pub(crate) fn write_zfile<P>(
     size: u32,
     modified: Option<u32>,
     mode: Option<u32>,
+    escape_control: bool,
 ) -> Result<Option<()>, Error>
 where
     P: Write + ?Sized,
@@ -79,12 +80,18 @@ where
     buf.push(b'\0').map_err(|_| Error::OutOfMemory)?;
 
     if Header::new(Encoding::ZBIN32, Frame::ZFILE, [0; 4])
-        .write(port)?
+        .write_with_escape_control(port, escape_control)?
         .is_none()
     {
         return Ok(None);
     }
-    write_subpacket(port, Encoding::ZBIN32, SubpacketType::ZCRCW, buf)
+    write_subpacket(
+        port,
+        Encoding::ZBIN32,
+        SubpacketType::ZCRCW,
+        buf,
+        escape_control,
+    )
 }
 
 #[cfg(test)]

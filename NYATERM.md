@@ -8,7 +8,7 @@ change to `zmodem2` on top of an unmodified upstream base.
 - Base revision: `fc6b0fd9bbf5348b2fac00ecb22bc9e40f4251f5` (`0.7.2`)
 - Branch: `nyaterm`
 
-No library source is modified: the only patch is to `build.rs`.
+The original build-only patch is followed by the protocol fix below.
 
 ## Patches
 
@@ -60,3 +60,16 @@ cargo test                   # 35 passed (the lrzsz integration tests are
 
 The `has_lrzsz` integration tests against real `rz`/`sz` run in
 `.github/workflows/nyaterm.yml`, which installs lrzsz first.
+
+## ESCCTL compatibility (2026-10-03)
+
+Adapt Tauri NyaTerm e6699580d to the 0.7 poll/submit API. Honor the
+receiver ESCCTL flag for binary headers, file metadata, payloads and CRCs.
+The capability stays enabled across subsequent receiver-init packets.
+Default encoding and hex framing remain unchanged.
+
+Validation on Windows: cargo test (36 unit tests passed), cargo clippy
+--all-targets, cargo fmt -- --check. The regression negotiates ESCCTL and
+checks binary metadata and all 256 payload bytes for unescaped controls.
+Existing round-trip and retry tests pass. Real lrzsz interoperability tests
+require Unix and were not run locally.

@@ -73,6 +73,17 @@ impl Header {
     where
         P: Write + ?Sized,
     {
+        self.write_with_escape_control(port, false)
+    }
+
+    pub(crate) fn write_with_escape_control<P>(
+        self,
+        port: &mut P,
+        escape_control: bool,
+    ) -> Result<Option<()>, Error>
+    where
+        P: Write + ?Sized,
+    {
         if write_header_start(port, self.encoding)?.is_none() {
             return Ok(None);
         }
@@ -99,7 +110,7 @@ impl Header {
             if write_header_end_hex(port, self.frame)?.is_none() {
                 return Ok(None);
             }
-        } else if write_slice_escaped(port, &out)?.is_none() {
+        } else if write_slice_escaped_with_control(port, &out, escape_control)?.is_none() {
             return Ok(None);
         }
 
@@ -294,20 +305,38 @@ pub(crate) fn write_slice_escaped<P>(port: &mut P, buf: &[u8]) -> Result<Option<
 where
     P: Write + ?Sized,
 {
-    for value in buf {
-        if write_byte_escaped(port, *value)?.is_none() {
-            return Ok(None);
-        }
-    }
-
-    Ok(Some(()))
+    write_slice_escaped_with_control(port, buf, false)
 }
 
-pub(crate) fn write_byte_escaped<P>(port: &mut P, value: u8) -> Result<Option<()>, Error>
+pub(crate) fn write_slice_escaped_with_control<P>(
+    port: &mut P,
+    buf: &[u8],
+    escape_control: bool,
+) -> Result<Option<()>, Error>
 where
     P: Write + ?Sized,
 {
-    let escaped = zdle::ZDLE_TABLE[value as usize];
+    for value in buf {
+        if write_byte_escaped_with_control(port, *value, escape_control)?.is_none() {
+            return Ok(None);
+        }
+    }
+    Ok(Some(()))
+}
+
+fn write_byte_escaped_with_control<P>(
+    port: &mut P,
+    value: u8,
+    escape_control: bool,
+) -> Result<Option<()>, Error>
+where
+    P: Write + ?Sized,
+{
+    let escaped = if escape_control && (value & 0x60) == 0 {
+        value ^ 0x40
+    } else {
+        zdle::ZDLE_TABLE[value as usize]
+    };
     if escaped != value && port.write_byte(ZDLE)?.is_none() {
         return Ok(None);
     }

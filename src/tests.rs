@@ -1096,3 +1096,73 @@ fn test_manual_accept_at_eof_completes() {
     assert!(receiver.submit_wire(&zeof).unwrap() > 0);
     assert_eq!(receiver.poll(), Action::Event(Event::FileCompleted));
 }
+
+#[test]
+fn escctl_negotiation_escapes_binary_headers_metadata_data_and_crc() {
+    fn wire(sender: &mut Sender) -> Vec<u8> {
+        let mut result = Vec::new();
+        loop {
+            match sender.poll() {
+                Action::WriteWire(bytes) => {
+                    let count = bytes.len();
+                    result.extend_from_slice(bytes);
+                    sender.wire_written(count);
+                }
+                Action::Event(_) => {}
+                _ => break,
+            }
+        }
+        result
+    }
+    fn assert_no_bare_controls(bytes: &[u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if bytes[offset] == ZDLE {
+                assert!(offset + 1 < bytes.len());
+                offset += 2;
+            } else {
+                assert_ne!(
+                    bytes[offset] & 0x60,
+                    0,
+                    "bare control at {offset}: {bytes:?}"
+                );
+                offset += 1;
+            }
+        }
+    }
+    let mut sender = Sender::new().unwrap();
+    wire(&mut sender);
+    sender
+        .start_file(FileInfo::new(b"control.bin", Some(Position::new(256))))
+        .unwrap();
+    let init = write_header(Header::new(
+        Encoding::ZHEX,
+        Frame::ZRINIT,
+        [0, 0, 0, (Zrinit::ESCCTL | Zrinit::CANFC32).bits()],
+    ));
+    sender.submit_wire(&init).unwrap();
+    let metadata = wire(&mut sender);
+    assert_no_bare_controls(&metadata);
+    sender
+        .submit_wire(&write_header(Header::new(
+            Encoding::ZHEX,
+            Frame::ZRPOS,
+            [0; 4],
+        )))
+        .unwrap();
+    // Drain any pending events before satisfying the read request.
+    loop {
+        match sender.poll() {
+            Action::ReadFile { .. } => break,
+            Action::Event(_) => {}
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+    let payload = (0..=255).collect::<Vec<u8>>();
+    sender.submit_file(&payload).unwrap();
+    let data = wire(&mut sender);
+    assert_no_bare_controls(&data);
+    for byte in (0u8..=31).chain(128..=159) {
+        assert!(data.windows(2).any(|pair| pair == [ZDLE, byte ^ 0x40]));
+    }
+}

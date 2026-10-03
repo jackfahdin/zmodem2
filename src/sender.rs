@@ -47,6 +47,7 @@ pub struct Sender {
     /// `abort()` queued the cancel sequence: it goes out before the
     /// `Aborted` event.
     pending_abort: bool,
+    escape_control: bool,
 }
 
 impl Sender {
@@ -77,6 +78,7 @@ impl Sender {
             streaming_window: SUBPACKET_PER_ACK,
             streaming_window_enabled: false,
             pending_abort: false,
+            escape_control: false,
         };
         sender.queue_zrqinit()?;
         Ok(sender)
@@ -361,8 +363,12 @@ impl Sender {
     }
 
     fn queue_header(&mut self, header: Header) -> Result<(), Error> {
+        let escape_control = self.escape_control;
         let mut writer = self.queue_writer()?;
-        if header.write(&mut writer)?.is_none() {
+        if header
+            .write_with_escape_control(&mut writer, escape_control)?
+            .is_none()
+        {
             return Err(Error::OutOfMemory);
         }
         Ok(())
@@ -385,6 +391,7 @@ impl Sender {
             file_size,
             file_modified,
             file_mode,
+            self.escape_control,
         )?
         .is_none()
         {
@@ -400,16 +407,17 @@ impl Sender {
         kind: SubpacketType,
         include_header: bool,
     ) -> Result<(), Error> {
+        let escape_control = self.escape_control;
         let mut writer = self.queue_writer()?;
         if include_header
             && ZDATA_HEADER
                 .with_count(offset)
-                .write(&mut writer)?
+                .write_with_escape_control(&mut writer, escape_control)?
                 .is_none()
         {
             return Err(Error::OutOfMemory);
         }
-        if write_subpacket(&mut writer, Encoding::ZBIN32, kind, data)?.is_none() {
+        if write_subpacket(&mut writer, Encoding::ZBIN32, kind, data, escape_control)?.is_none() {
             return Err(Error::OutOfMemory);
         }
         Ok(())
@@ -499,6 +507,7 @@ impl Sender {
         let flags = header.count().to_le_bytes();
         let rx_buf_size = u16::from_le_bytes([flags[0], flags[1]]) as usize;
         let caps = flags[3];
+        self.escape_control |= (caps & Zrinit::ESCCTL.bits()) != 0;
         let can_ovio = (caps & Zrinit::CANOVIO.bits()) != 0;
 
         // Receiver can receive and write data simultaneously and sender does
