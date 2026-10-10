@@ -50,3 +50,12 @@ pub use transmission::*;
 pub(crate) const ZPAD: u8 = b'*';
 pub(crate) const ZDLE: u8 = 0x18;
 pub(crate) const XON: u8 = 0x11;
+
+/// The cancel sequence sent by `Sender::abort` and `Receiver::abort`:
+/// ten CAN (ZDLE) bytes, which make the other end give up (five in a row
+/// are enough), then ten backspaces to erase them from a terminal that
+/// shows them. The same bytes as lrzsz's `canit()`.
+pub(crate) const ABORT_SEQUENCE: [u8; 20] = [
+    ZDLE, ZDLE, ZDLE, ZDLE, ZDLE, ZDLE, ZDLE, ZDLE, ZDLE, ZDLE, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+    0x08, 0x08, 0x08, 0x08,
+];

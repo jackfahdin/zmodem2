@@ -4,6 +4,7 @@
 
 //! ZMODEM sender state machine.
 
+use crate::ABORT_SEQUENCE;
 use crate::api::{Action, Event, FileInfo, Position};
 use crate::buffer::Buffer;
 use crate::error::Error;
@@ -41,6 +42,9 @@ pub struct Sender {
     pending_finish: bool,
     streaming_window: usize,
     streaming_window_enabled: bool,
+    /// `abort()` queued the cancel sequence: it goes out before the
+    /// `Aborted` event.
+    pending_abort: bool,
 }
 
 impl Sender {
@@ -68,6 +72,7 @@ impl Sender {
             pending_finish: false,
             streaming_window: SUBPACKET_PER_ACK,
             streaming_window_enabled: false,
+            pending_abort: false,
         };
         sender.queue_zrqinit()?;
         Ok(sender)
@@ -288,9 +293,19 @@ impl Sender {
     }
 
     /// Aborts the current session.
+    ///
+    /// Outgoing bytes not yet written are dropped and the cancel sequence
+    /// (ten CAN, then ten backspaces, as lrzsz sends it) is queued, so the
+    /// other end stops too: [`poll`](Self::poll) returns it as
+    /// [`Action::WriteWire`] before [`Event::Aborted`].
     pub fn abort(&mut self) {
         self.state = SenderPhase::Done;
         self.pending_request = None;
+        self.outgoing.clear();
+        self.outgoing_offset = 0;
+        // the buffer is far larger than the sequence
+        let _ = self.outgoing.extend_from_slice(&ABORT_SEQUENCE);
+        self.pending_abort = true;
         self.pending_event = Some(SenderEvent::Aborted);
     }
 
@@ -300,6 +315,12 @@ impl Sender {
     /// file read request, and finally [`Action::Idle`] when there is no
     /// immediate work.
     pub fn poll(&mut self) -> Action<'_> {
+        if self.pending_abort {
+            if self.outgoing() {
+                return Action::WriteWire(self.drain_outgoing());
+            }
+            self.pending_abort = false;
+        }
         if let Some(event) = self.pending_event.take() {
             return Action::Event(match event {
                 SenderEvent::FileComplete => Event::FileCompleted,

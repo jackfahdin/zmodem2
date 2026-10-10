@@ -16,7 +16,7 @@ use crate::wire::{
     BufferWriter, HeaderReader, RxCrc, SUBPACKET_MAX_SIZE, SliceReader, SubpacketType,
     WIRE_BUF_SIZE, write_zrinit,
 };
-use crate::{ZDLE, zdle};
+use crate::{ABORT_SEQUENCE, ZDLE, zdle};
 use core::cmp::min;
 
 const RECEIVER_EVENT_QUEUE_CAP: usize = 4;
@@ -48,6 +48,9 @@ pub struct Receiver {
     manual_accept: bool,
     zrpos_retries: u8,
     file_active: bool,
+    /// `abort()` queued the cancel sequence: it goes out before the
+    /// `Aborted` event.
+    pending_abort: bool,
 }
 
 /// Consecutive corrupt data subpackets, without any forward progress in
@@ -121,6 +124,7 @@ impl Receiver {
             manual_accept: false,
             zrpos_retries: 0,
             file_active: false,
+            pending_abort: false,
         };
         receiver.queue_zrinit()?;
         Ok(receiver)
@@ -319,11 +323,21 @@ impl Receiver {
 
     /// Aborts the current session.
     ///
+    /// Outgoing bytes not yet written are dropped and the cancel sequence
+    /// (ten CAN, then ten backspaces, as lrzsz sends it) is queued, so the
+    /// other end stops too: [`poll`](Self::poll) returns it as
+    /// [`Action::WriteWire`] before [`Event::Aborted`].
+    ///
     /// # Errors
     ///
     /// * [`OutOfMemory`](crate::Error::OutOfMemory) when the event queue is full
     pub fn abort(&mut self) -> Result<(), Error> {
         self.state = ReceiverPhase::SessionEnd;
+        self.outgoing.clear();
+        self.outgoing_offset = 0;
+        // the buffer is far larger than the sequence
+        let _ = self.outgoing.extend_from_slice(&ABORT_SEQUENCE);
+        self.pending_abort = true;
         self.push_event(ReceiverEvent::Aborted)
     }
 
@@ -333,6 +347,12 @@ impl Receiver {
     /// received file bytes, and finally [`Action::Idle`] when there is no
     /// immediate work.
     pub fn poll(&mut self) -> Action<'_> {
+        if self.pending_abort {
+            if self.outgoing() {
+                return Action::WriteWire(self.drain_outgoing());
+            }
+            self.pending_abort = false;
+        }
         if let Some(event) = self.pop_event() {
             return Action::Event(match event {
                 ReceiverEvent::FileStart => Event::FileStarted(FileInfo::new(

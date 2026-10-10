@@ -434,6 +434,39 @@ fn test_sender_skips_file_on_zskip() {
 }
 
 #[test]
+fn test_local_abort_sends_cancel_first() {
+    let mut expected = [0x18u8; 20];
+    expected[10..].fill(0x08);
+
+    // the sender, with its ZRQINIT still unwritten: dropped for the cancel
+    let mut sender = Sender::new().unwrap();
+    sender.abort();
+    match sender.poll() {
+        Action::WriteWire(bytes) => assert_eq!(bytes, &expected[..]),
+        other => panic!("expected the cancel sequence, got {other:?}"),
+    }
+    sender.wire_written(20);
+    assert_eq!(sender.poll(), Action::Event(Event::Aborted));
+    assert_eq!(sender.poll(), Action::Idle);
+
+    // the receiver, written in two parts
+    let mut receiver = Receiver::new().unwrap();
+    drain_wire_receiver(&mut receiver);
+    receiver.abort().unwrap();
+    match receiver.poll() {
+        Action::WriteWire(bytes) => assert_eq!(bytes, &expected[..]),
+        other => panic!("expected the cancel sequence, got {other:?}"),
+    }
+    receiver.wire_written(7);
+    match receiver.poll() {
+        Action::WriteWire(bytes) => assert_eq!(bytes, &expected[7..]),
+        other => panic!("expected the rest of the cancel sequence, got {other:?}"),
+    }
+    receiver.wire_written(13);
+    assert_eq!(receiver.poll(), Action::Event(Event::Aborted));
+}
+
+#[test]
 fn test_abort_events() {
     let zabort = write_header(Header::new(Encoding::ZHEX, Frame::ZABORT, [0; 4]));
 
@@ -705,6 +738,12 @@ fn test_abort_event() {
     drain_wire_sender(&mut sender);
 
     sender.abort();
+    // the cancel sequence first, then the event
+    let n = match sender.poll() {
+        Action::WriteWire(bytes) => bytes.len(),
+        other => panic!("expected the cancel sequence, got {other:?}"),
+    };
+    sender.wire_written(n);
     assert_eq!(sender.poll(), Action::Event(Event::Aborted));
 }
 

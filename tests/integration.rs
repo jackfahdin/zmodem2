@@ -489,3 +489,170 @@ fn test_batch_to_rz() {
         assert_files_equal(path, &received_path);
     }
 }
+
+/// Waits up to `limit` for `child` to exit; its status, or `None` if it is
+/// still running.
+fn wait_exit(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        sleep(Duration::from_millis(50));
+    }
+    None
+}
+
+/// Writes the bytes `poll()` returns until it has none: the cancel
+/// sequence after `abort()`. Returns the event that follows.
+fn drain_after_abort<F>(port: &mut MockPort<ChildStdout, ChildStdin>, mut poll: F) -> String
+where
+    F: FnMut(&mut dyn FnMut(&[u8]) -> usize) -> Option<String>,
+{
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the cancel sequence was not written"
+        );
+        let mut write = |bytes: &[u8]| match port.write(bytes) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
+            Err(e) => panic!("wire write failed: {e}"),
+        };
+        if let Some(event) = poll(&mut write) {
+            return event;
+        }
+    }
+}
+
+#[test]
+#[cfg(has_lrzsz)]
+fn test_abort_stops_sz() {
+    let test_files = TestFiles::new();
+    let (mut sz_process, mut port) = setup_sz(&test_files);
+    let mut receiver = zmodem2::Receiver::new().unwrap();
+    let mut wire_buf = [0u8; 4096];
+    let mut input_buf: Vec<u8> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    // receive until the first file data arrives, then abort
+    'transfer: loop {
+        assert!(Instant::now() < deadline, "no file data from sz");
+        match port.read(&mut wire_buf) {
+            Ok(n) => input_buf.extend_from_slice(&wire_buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => panic!("wire read failed: {e}"),
+        }
+        match receiver.poll() {
+            Action::WriteWire(bytes) => match port.write(bytes) {
+                Ok(n) => receiver.wire_written(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("wire write failed: {e}"),
+            },
+            Action::WriteFile(_) => break 'transfer,
+            Action::Event(Event::Aborted) => panic!("receiver aborted"),
+            Action::Idle => {
+                if !input_buf.is_empty() {
+                    let consumed = receiver.submit_wire(&input_buf).unwrap();
+                    input_buf.drain(..consumed);
+                }
+                sleep(Duration::from_millis(5));
+            }
+            _ => {}
+        }
+    }
+    receiver.abort().unwrap();
+    let event = drain_after_abort(&mut port, |write| match receiver.poll() {
+        Action::WriteWire(bytes) => {
+            let n = write(bytes);
+            receiver.wire_written(n);
+            None
+        }
+        other => Some(format!("{other:?}")),
+    });
+    assert_eq!(event, format!("{:?}", Action::Event(Event::Aborted)));
+
+    // the pipes stay open: sz can only stop because it was cancelled
+    let status = wait_exit(&mut sz_process, Duration::from_secs(10));
+    if status.is_none() {
+        let _ = sz_process.kill();
+    }
+    let status = status.expect("sz still running 10 s after abort()");
+    assert!(!status.success(), "sz reported success after abort()");
+}
+
+#[test]
+#[cfg(has_lrzsz)]
+fn test_abort_stops_rz() {
+    let test_files = TestFiles::new();
+    let dest_dir = tempfile::Builder::new()
+        .prefix("zmodem_test_dest_")
+        .tempdir()
+        .unwrap();
+    let (mut rz_process, mut port) = setup_rz(&dest_dir);
+    let path = &test_files.paths[0];
+    let name = path.file_name().unwrap().to_str().unwrap();
+    let size = path.metadata().unwrap().len() as u32;
+    let mut file = File::open(path).unwrap();
+    let mut sender = zmodem2::Sender::new().unwrap();
+    sender
+        .start_file(FileInfo::new(name.as_bytes(), Some(Position::new(size))))
+        .unwrap();
+    let mut wire_buf = [0u8; 4096];
+    let mut input_buf: Vec<u8> = Vec::new();
+    let mut file_buf = [0u8; 1024];
+    let mut submitted = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    // send until a few subpackets have gone out, then abort
+    while submitted < 4 * 1024 {
+        assert!(Instant::now() < deadline, "rz never asked for data");
+        match port.read(&mut wire_buf) {
+            Ok(n) => input_buf.extend_from_slice(&wire_buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => panic!("wire read failed: {e}"),
+        }
+        match sender.poll() {
+            Action::WriteWire(bytes) => match port.write(bytes) {
+                Ok(n) => sender.wire_written(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("wire write failed: {e}"),
+            },
+            Action::ReadFile { offset, max_len } => {
+                file.seek(std::io::SeekFrom::Start(u64::from(offset.get())))
+                    .unwrap();
+                let n = file.read(&mut file_buf[..max_len]).unwrap();
+                sender.submit_file(&file_buf[..n]).unwrap();
+                submitted += n;
+            }
+            Action::Event(Event::Aborted) => panic!("sender aborted"),
+            Action::Idle => {
+                if !input_buf.is_empty() {
+                    let consumed = sender.submit_wire(&input_buf).unwrap();
+                    input_buf.drain(..consumed);
+                }
+                sleep(Duration::from_millis(5));
+            }
+            _ => {}
+        }
+    }
+    sender.abort();
+    let event = drain_after_abort(&mut port, |write| match sender.poll() {
+        Action::WriteWire(bytes) => {
+            let n = write(bytes);
+            sender.wire_written(n);
+            None
+        }
+        other => Some(format!("{other:?}")),
+    });
+    assert_eq!(event, format!("{:?}", Action::Event(Event::Aborted)));
+
+    // the pipes stay open: rz can only stop because it was cancelled
+    let status = wait_exit(&mut rz_process, Duration::from_secs(10));
+    if status.is_none() {
+        let _ = rz_process.kill();
+    }
+    let status = status.expect("rz still running 10 s after abort()");
+    assert!(!status.success(), "rz reported success after abort()");
+}
