@@ -38,18 +38,48 @@ impl From<Position> for u32 {
 
 /// File metadata advertised by the sender.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct FileInfo<'a> {
     /// Raw file name bytes as sent on the wire.
     pub name: &'a [u8],
     /// File size when known.
     pub size: Option<Position>,
+    /// When the file was last changed, in seconds since the Unix epoch
+    /// (UTC), when known. `rz` gives a file without it the time it is
+    /// received.
+    pub modified: Option<u32>,
+    /// The file's Unix mode when known, e.g. `0o100_644` for a regular
+    /// file readable by all and writable by its owner. `rz` takes the
+    /// 0x8000 bit for "a regular file of a Unix-like system", whose
+    /// contents it passes through unchanged.
+    pub mode: Option<u32>,
 }
 
 impl<'a> FileInfo<'a> {
     /// Creates file metadata from raw name bytes and an optional size.
     #[must_use]
     pub const fn new(name: &'a [u8], size: Option<Position>) -> Self {
-        Self { name, size }
+        Self {
+            name,
+            size,
+            modified: None,
+            mode: None,
+        }
+    }
+
+    /// The same metadata with a modification time (seconds since the Unix
+    /// epoch, UTC).
+    #[must_use]
+    pub const fn with_modified(mut self, modified: u32) -> Self {
+        self.modified = Some(modified);
+        self
+    }
+
+    /// The same metadata with a Unix mode.
+    #[must_use]
+    pub const fn with_mode(mut self, mode: u32) -> Self {
+        self.mode = Some(mode);
+        self
     }
 }
 

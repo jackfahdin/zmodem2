@@ -656,3 +656,133 @@ fn test_abort_stops_rz() {
     let status = status.expect("rz still running 10 s after abort()");
     assert!(!status.success(), "rz reported success after abort()");
 }
+
+#[test]
+#[cfg(has_lrzsz)]
+fn test_time_and_mode_reach_rz() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let test_files = TestFiles::new();
+    let dest_dir = tempfile::Builder::new()
+        .prefix("zmodem_test_dest_")
+        .tempdir()
+        .unwrap();
+    let (mut rz_process, mut port) = setup_rz(&dest_dir);
+
+    let path = &test_files.paths[0];
+    let name = path.file_name().unwrap().to_str().unwrap();
+    let size = path.metadata().unwrap().len() as u32;
+    let modified = 1_700_000_000;
+    let mut file = File::open(path).unwrap();
+    let mut sender = zmodem2::Sender::new().unwrap();
+    sender
+        .start_file(
+            FileInfo::new(name.as_bytes(), Some(Position::new(size)))
+                .with_modified(modified)
+                .with_mode(0o100_640),
+        )
+        .unwrap();
+
+    let mut wire_buf = [0u8; 4096];
+    let mut input_buf: Vec<u8> = Vec::new();
+    let mut file_buf = [0u8; 1024];
+    let mut session_done = false;
+    let deadline = Instant::now() + Duration::from_secs(60);
+
+    loop {
+        assert!(Instant::now() < deadline, "the transfer did not finish");
+        match port.read(&mut wire_buf) {
+            Ok(n) => input_buf.extend_from_slice(&wire_buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => panic!("wire read failed: {e}"),
+        }
+        match sender.poll() {
+            Action::WriteWire(bytes) => match port.write(bytes) {
+                Ok(n) => sender.wire_written(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("wire write failed: {e}"),
+            },
+            Action::ReadFile { offset, max_len } => {
+                file.seek(std::io::SeekFrom::Start(u64::from(offset.get())))
+                    .unwrap();
+                let n = file.read(&mut file_buf[..max_len]).unwrap();
+                sender.submit_file(&file_buf[..n]).unwrap();
+            }
+            Action::Event(Event::FileCompleted) => sender.finish().unwrap(),
+            Action::Event(Event::SessionCompleted) => session_done = true,
+            Action::Event(Event::Aborted) => panic!("sender aborted"),
+            Action::Idle => {
+                if session_done {
+                    break;
+                }
+                if !input_buf.is_empty() {
+                    let consumed = sender.submit_wire(&input_buf).unwrap();
+                    input_buf.drain(..consumed);
+                }
+                sleep(Duration::from_millis(5));
+            }
+            _ => {}
+        }
+    }
+    rz_process.wait().unwrap();
+
+    let received = dest_dir.path().join(name);
+    let meta = received.metadata().unwrap();
+    assert_eq!(meta.mtime(), i64::from(modified), "modification time");
+    assert_eq!(meta.permissions().mode() & 0o777, 0o640, "file mode");
+}
+
+#[test]
+#[cfg(has_lrzsz)]
+fn test_time_and_mode_from_sz() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let test_files = TestFiles::new();
+    let path = &test_files.paths[0];
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o604)).unwrap();
+    let meta = path.metadata().unwrap();
+    let (mut sz_process, mut port) = setup_sz(&test_files);
+
+    let mut receiver = zmodem2::Receiver::new().unwrap();
+    let mut wire_buf = [0u8; 4096];
+    let mut input_buf: Vec<u8> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let started = loop {
+        assert!(Instant::now() < deadline, "no ZFILE from sz");
+        match port.read(&mut wire_buf) {
+            Ok(n) => input_buf.extend_from_slice(&wire_buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => panic!("wire read failed: {e}"),
+        }
+        match receiver.poll() {
+            Action::WriteWire(bytes) => match port.write(bytes) {
+                Ok(n) => receiver.wire_written(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("wire write failed: {e}"),
+            },
+            Action::Event(Event::FileStarted(info)) => break (info.modified, info.mode),
+            Action::Event(Event::Aborted) => panic!("receiver aborted"),
+            Action::Idle => {
+                if !input_buf.is_empty() {
+                    let consumed = receiver.submit_wire(&input_buf).unwrap();
+                    input_buf.drain(..consumed);
+                }
+                sleep(Duration::from_millis(5));
+            }
+            _ => {}
+        }
+    };
+
+    // what sz reads from the file system
+    assert_eq!(started.0, Some(meta.mtime() as u32), "modification time");
+    assert_eq!(
+        started.1.map(|m| m & 0o777),
+        Some(0o604),
+        "file mode: {:?}",
+        started.1
+    );
+
+    // the rest of the batch is of no interest here
+    sz_process.kill().unwrap();
+    sz_process.wait().unwrap();
+}

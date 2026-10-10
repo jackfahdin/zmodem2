@@ -86,6 +86,99 @@ fn test_receive_malformed_header() {
     assert_eq!(receiver.poll(), Action::Idle);
 }
 
+/// Sends the ZFILE of `info` into a receiver and returns the metadata of
+/// its `FileStarted` event.
+fn zfile_round_trip(info: FileInfo) -> (Vec<u8>, Option<u32>, Option<u32>, Option<u32>) {
+    let mut sender = Sender::new().unwrap();
+    drain_wire_sender(&mut sender);
+    sender.start_file(info).unwrap();
+    let zrinit = write_header(Header::new(Encoding::ZHEX, Frame::ZRINIT, [0; 4]));
+    assert!(sender.submit_wire(&zrinit).unwrap() > 0);
+
+    let mut wire = Vec::new();
+    while let Action::WriteWire(bytes) = sender.poll() {
+        wire.extend_from_slice(bytes);
+        let n = bytes.len();
+        sender.wire_written(n);
+    }
+
+    let mut receiver = Receiver::new().unwrap();
+    drain_wire_receiver(&mut receiver);
+    let mut offset = 0;
+    loop {
+        match receiver.poll() {
+            Action::WriteWire(bytes) => {
+                let n = bytes.len();
+                receiver.wire_written(n);
+            }
+            Action::Event(Event::FileStarted(got)) => {
+                return (
+                    got.name.to_vec(),
+                    got.size.map(Position::get),
+                    got.modified,
+                    got.mode,
+                );
+            }
+            Action::Event(event) => panic!("unexpected event: {event:?}"),
+            Action::Idle => {
+                assert!(offset < wire.len(), "ran out of input before FileStarted");
+                let consumed = receiver.submit_wire(&wire[offset..]).unwrap();
+                assert!(consumed > 0);
+                offset += consumed;
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn test_zfile_carries_time_and_mode() {
+    let info = FileInfo::new(b"stamped.bin", Some(Position::new(16)))
+        .with_modified(1_700_000_000)
+        .with_mode(0o100_644);
+    let (name, size, modified, mode) = zfile_round_trip(info);
+    assert_eq!(name, b"stamped.bin");
+    assert_eq!(size, Some(16));
+    assert_eq!(modified, Some(1_700_000_000));
+    assert_eq!(mode, Some(0o100_644));
+
+    // as lrzsz writes them: octal, a space between each
+    let mut sender = Sender::new().unwrap();
+    drain_wire_sender(&mut sender);
+    sender.start_file(info).unwrap();
+    let zrinit = write_header(Header::new(Encoding::ZHEX, Frame::ZRINIT, [0; 4]));
+    assert!(sender.submit_wire(&zrinit).unwrap() > 0);
+    let mut wire = Vec::new();
+    while let Action::WriteWire(bytes) = sender.poll() {
+        wire.extend_from_slice(bytes);
+        let n = bytes.len();
+        sender.wire_written(n);
+    }
+    let field = b"stamped.bin\x0016 14524770400 100644\x00";
+    assert!(
+        wire.windows(field.len()).any(|w| w == field),
+        "the ZFILE fields are not as lrzsz writes them"
+    );
+}
+
+#[test]
+fn test_zfile_without_time_and_mode() {
+    // unchanged from before: name and length only
+    let (name, size, modified, mode) =
+        zfile_round_trip(FileInfo::new(b"plain.bin", Some(Position::new(16))));
+    assert_eq!(name, b"plain.bin");
+    assert_eq!(size, Some(16));
+    assert_eq!(modified, None);
+    assert_eq!(mode, None);
+
+    // a mode without a time: the time goes out as 0 ("unknown"), which
+    // the receiver reports as none, and the mode still arrives
+    let info = FileInfo::new(b"moded.bin", Some(Position::new(16))).with_mode(0o100_600);
+    let (_, _, modified, mode) = zfile_round_trip(info);
+    assert_eq!(modified, None);
+    assert_eq!(mode, Some(0o100_600));
+}
+
 #[test]
 fn test_receive_zfile_with_non_utf8_name() {
     let file_name = b"bad\x80name";

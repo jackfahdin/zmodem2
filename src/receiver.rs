@@ -7,7 +7,7 @@
 use crate::api::{Action, Event, FileInfo, Position};
 use crate::buffer::Buffer;
 use crate::error::Error;
-use crate::file::parse_file_size;
+use crate::file::{parse_file_size, parse_octal};
 use crate::header::{Encoding, Frame, Header, ZACK_HEADER, ZFIN_HEADER, ZNAK_HEADER, ZRPOS_HEADER};
 use crate::io::Read;
 use crate::session::{ReceiverEvent, ReceiverPhase, SubpacketPhase};
@@ -31,6 +31,8 @@ pub struct Receiver {
     count: u32,
     file_name: String,
     file_size: u32,
+    file_modified: Option<u32>,
+    file_mode: Option<u32>,
     buf: Buffer<SUBPACKET_MAX_SIZE>,
     buf_write_offset: usize,
     data_encoding: Encoding,
@@ -107,6 +109,8 @@ impl Receiver {
             count: 0,
             file_name: String::new(),
             file_size: 0,
+            file_modified: None,
+            file_mode: None,
             buf: Buffer::<SUBPACKET_MAX_SIZE>::new(),
             buf_write_offset: 0,
             data_encoding: Encoding::ZBIN,
@@ -355,10 +359,13 @@ impl Receiver {
         }
         if let Some(event) = self.pop_event() {
             return Action::Event(match event {
-                ReceiverEvent::FileStart => Event::FileStarted(FileInfo::new(
-                    &self.file_name,
-                    Some(Position::new(self.file_size)),
-                )),
+                ReceiverEvent::FileStart => {
+                    let mut info =
+                        FileInfo::new(&self.file_name, Some(Position::new(self.file_size)));
+                    info.modified = self.file_modified;
+                    info.mode = self.file_mode;
+                    Event::FileStarted(info)
+                }
                 ReceiverEvent::FileComplete => Event::FileCompleted,
                 ReceiverEvent::SessionComplete => Event::SessionCompleted,
                 ReceiverEvent::Aborted => Event::Aborted,
@@ -561,13 +568,15 @@ impl Receiver {
             .extend_from_slice(file_name_bytes)
             .map_err(|_| Error::OutOfMemory)?;
 
+        self.file_modified = None;
+        self.file_mode = None;
         if let Some(size_str_bytes) = fields.next() {
-            let size_field_bytes = size_str_bytes
-                .split(|&b| b == b' ')
-                .next()
-                .unwrap_or_default();
-
-            self.file_size = parse_file_size(size_field_bytes)?;
+            // "<length> <modification time> <mode> ...", the fields after
+            // the length optional and octal; a zero time means unknown
+            let mut meta = size_str_bytes.split(|&b| b == b' ');
+            self.file_size = parse_file_size(meta.next().unwrap_or_default())?;
+            self.file_modified = meta.next().and_then(parse_octal).filter(|&t| t != 0);
+            self.file_mode = meta.next().and_then(parse_octal).filter(|&m| m != 0);
         } else {
             self.file_size = 0;
         }

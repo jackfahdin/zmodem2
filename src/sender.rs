@@ -28,6 +28,8 @@ pub struct Sender {
     state: SenderPhase,
     file_name: String,
     file_size: u32,
+    file_modified: Option<u32>,
+    file_mode: Option<u32>,
     has_file: bool,
     pending_request: Option<FileRequest>,
     frame_remaining: usize,
@@ -58,6 +60,8 @@ impl Sender {
             state: SenderPhase::WaitReceiverInit,
             file_name: String::new(),
             file_size: 0,
+            file_modified: None,
+            file_mode: None,
             has_file: false,
             pending_request: None,
             frame_remaining: 0,
@@ -128,6 +132,8 @@ impl Sender {
             .extend_from_slice(file_name)
             .map_err(|_| Error::OutOfMemory)?;
         self.file_size = file_size;
+        self.file_modified = info.modified;
+        self.file_mode = info.mode;
         self.has_file = true;
         self.pending_request = None;
         self.frame_remaining = 0;
@@ -368,9 +374,20 @@ impl Sender {
 
     fn queue_zfile(&mut self) -> Result<(), Error> {
         let file_size = self.file_size;
+        let file_modified = self.file_modified;
+        let file_mode = self.file_mode;
         let file_name = &self.file_name;
         let mut writer = BufferWriter::new(&mut self.outgoing);
-        if write_zfile(&mut writer, &mut self.buf, file_name, file_size)?.is_none() {
+        if write_zfile(
+            &mut writer,
+            &mut self.buf,
+            file_name,
+            file_size,
+            file_modified,
+            file_mode,
+        )?
+        .is_none()
+        {
             return Err(Error::OutOfMemory);
         }
         Ok(())
