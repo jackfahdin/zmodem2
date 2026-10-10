@@ -22,9 +22,6 @@ use crate::wire::{
 use core::cmp::min;
 
 /// ZMODEM sender state machine.
-// The sender carries a handful of independent flags (has-file,
-// frame-needs-header, finish-requested, receiver-nonstop) that read more
-// clearly as bools than as a single packed enum.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Sender {
     state: SenderPhase,
@@ -41,9 +38,9 @@ pub struct Sender {
     outgoing_offset: usize,
     header_reader: HeaderReader,
     pending_event: Option<SenderEvent>,
-    finish_requested: bool,
+    pending_finish: bool,
     streaming_window: usize,
-    rx_nonstop: bool,
+    streaming_window_enabled: bool,
 }
 
 impl Sender {
@@ -68,9 +65,9 @@ impl Sender {
             outgoing_offset: 0,
             header_reader: HeaderReader::new(),
             pending_event: None,
-            finish_requested: false,
+            pending_finish: false,
             streaming_window: SUBPACKET_PER_ACK,
-            rx_nonstop: false,
+            streaming_window_enabled: false,
         };
         sender.queue_zrqinit()?;
         Ok(sender)
@@ -93,7 +90,7 @@ impl Sender {
         // Recompute it now so a window set after the handshake still
         // takes effect; it only applies when the receiver advertised
         // nonstop I/O (see update_receiver_caps).
-        if self.rx_nonstop {
+        if self.streaming_window_enabled {
             self.max_subpackets_per_ack = self.streaming_window;
         }
     }
@@ -147,7 +144,7 @@ impl Sender {
     ///
     /// * [`Backpressure`](crate::Error::Backpressure) when outgoing bytes are still pending
     pub fn finish(&mut self) -> Result<(), Error> {
-        self.finish_requested = true;
+        self.pending_finish = true;
         if self.state == SenderPhase::ReadyForFile {
             if self.outgoing() {
                 return Err(Error::Backpressure);
@@ -434,7 +431,7 @@ impl Sender {
                     self.state = SenderPhase::WaitFilePos;
                 } else {
                     self.state = SenderPhase::ReadyForFile;
-                    if self.finish_requested {
+                    if self.pending_finish {
                         self.queue_zfin()?;
                         self.state = SenderPhase::WaitFinish;
                     }
@@ -443,7 +440,7 @@ impl Sender {
             SenderPhase::WaitFileDone => {
                 self.pending_event = Some(SenderEvent::FileComplete);
                 self.has_file = false;
-                if self.finish_requested {
+                if self.pending_finish {
                     self.queue_zfin()?;
                     self.state = SenderPhase::WaitFinish;
                 } else {
@@ -466,9 +463,9 @@ impl Sender {
         let caps = flags[3];
         let can_ovio = (caps & Zrinit::CANOVIO.bits()) != 0;
 
-        // Remember whether the streaming window governs pacing so a later
-        // set_streaming_window() can recompute the cadence.
-        self.rx_nonstop = rx_buf_size == 0 && can_ovio;
+        // Receiver can receive and write data simultaneously and sender does
+        // not have to cap to its buffer size.
+        self.streaming_window_enabled = rx_buf_size == 0 && can_ovio;
 
         if rx_buf_size == 0 {
             self.max_subpacket_size = SUBPACKET_MAX_SIZE;
