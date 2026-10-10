@@ -304,14 +304,12 @@ impl RxCrc {
         encoding: Encoding,
     ) -> Result<Option<()>, Error> {
         let crc_len = if encoding == Encoding::ZBIN32 { 4 } else { 2 };
-        let Some(byte) = read_byte_unescaped_stateful(port, &mut self.escape_pending)? else {
-            return Ok(None);
-        };
-        self.buf[self.bytes_read as usize] = byte;
-        self.bytes_read += 1;
-
-        if self.bytes_read < crc_len {
-            return Ok(None);
+        while self.bytes_read < crc_len {
+            let Some(byte) = read_byte_unescaped_stateful(port, &mut self.escape_pending)? else {
+                return Ok(None);
+            };
+            self.buf[self.bytes_read as usize] = byte;
+            self.bytes_read += 1;
         }
 
         if encoding == Encoding::ZBIN32 {

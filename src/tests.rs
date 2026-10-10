@@ -200,7 +200,7 @@ fn test_receive_zfile_with_non_utf8_name() {
         let n = bytes.len();
         sender.wire_written(n);
     }
-    assert!(!wire.is_empty());
+    assert_ne!(wire, []);
 
     let mut receiver = Receiver::new().unwrap();
     drain_wire_receiver(&mut receiver);
@@ -582,7 +582,7 @@ fn test_receiver_timeout_requeues_zrinit() {
     receiver.timeout().unwrap();
 
     match receiver.poll() {
-        Action::WriteWire(bytes) => assert!(!bytes.is_empty()),
+        Action::WriteWire(bytes) => assert_ne!(bytes, []),
         other => panic!("unexpected action: {other:?}"),
     }
 }
@@ -679,6 +679,9 @@ fn test_repeated_corruption_eventually_fails() {
         }
     }
     assert_eq!(result, Err(Error::UnexpectedCrc32));
+    // Re-entering after a fatal CRC error must not consume another CRC byte.
+    assert_eq!(receiver.submit_wire(&[0]), Err(Error::UnexpectedCrc32));
+    assert_eq!(receiver.submit_wire(&[]), Err(Error::UnexpectedCrc32));
 }
 
 #[test]
@@ -777,7 +780,7 @@ fn test_receiver_zcrcq_and_zcrce() {
     // ZCRCQ requests an acknowledgement, so a ZACK is queued.
     match receiver.poll() {
         Action::WriteWire(bytes) => {
-            assert!(!bytes.is_empty());
+            assert_ne!(bytes, []);
             let n = bytes.len();
             receiver.wire_written(n);
         }
