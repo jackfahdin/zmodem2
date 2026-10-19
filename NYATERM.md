@@ -5,7 +5,7 @@ change to `zmodem2` on top of an unmodified upstream base.
 
 - Fork: <https://github.com/nyakang/zmodem2>
 - Upstream: <https://codeberg.org/jarkko/zmodem2>
-- Base revision: `fc6b0fd9bbf5348b2fac00ecb22bc9e40f4251f5` (`0.7.2`)
+- Base revision: `2728ac6a1f571c5eded016f81decd780e6188589` (`main`, 0.7.3, 2026-10-20)
 - Branch: `nyaterm`
 
 The original build-only patch is followed by the protocol fix below.
@@ -73,3 +73,18 @@ Validation on Windows: cargo test (36 unit tests passed), cargo clippy
 checks binary metadata and all 256 payload bytes for unescaped controls.
 Existing round-trip and retry tests pass. Real lrzsz interoperability tests
 require Unix and were not run locally.
+
+## 2026-10-20 upstream rebase
+
+Fixed upstream target: `2728ac6a1f571c5eded016f81decd780e6188589`.
+Previous published head: `372662d9fef892ba36d628107bf8152ab46ba4ca`.
+Original branch retained as local `backup/nyaterm-20261020`; the audit directory
+contains the original patch, history and final range-diff.
+
+Retained the quiet lrzsz build probe and negotiated ESCCTL for binary headers,
+metadata, payloads and CRCs. The conflict resolution combines ESCCTL with upstream
+mtime/mode serialization, renamed streaming state and wire-before-Aborted cancel
+sequences. No public upstream additions are removed.
+Windows validation: cargo test passed all 40 unit tests; cargo clippy --all-targets
+and cargo fmt --all -- --check passed. Real rz/sz integration requires the Unix
+branch workflow with lrzsz installed and is not claimed as locally verified.
