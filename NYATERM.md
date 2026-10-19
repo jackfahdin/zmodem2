@@ -88,3 +88,11 @@ sequences. No public upstream additions are removed.
 Windows validation: cargo test passed all 40 unit tests; cargo clippy --all-targets
 and cargo fmt --all -- --check passed. Real rz/sz integration requires the Unix
 branch workflow with lrzsz installed and is not claimed as locally verified.
+
+
+### Native Linux interoperability follow-up
+
+WSL Ubuntu, Rust 1.99.0 and system lrzsz 0.12.21: cargo test --locked passed
+40 unit tests and all six real rz/sz integration tests, including send/receive
+batches, cancellation in both directions and file time/mode metadata in both
+directions. The Linux Rust toolchain and build target were isolated under /tmp.
